@@ -1,16 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -99,26 +103,44 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't get uploaded video aspect ratio", err)
+		return
+	}
+
+	var directory string
+	switch aspectRatio {
+	case "16:9":
+		directory = "landscape"
+	case "9:16":
+		directory = "portrait"
+	default:
+		directory = "other"
+	}
+
 	randomBytes := make([]byte, 32)
 	_, err = rand.Read(randomBytes)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't generate random bytes", err)
 		return
 	}
-	key := hex.EncodeToString(randomBytes) + ".mp4"
+
+	key := getAssetPath(mediaType)
+	key = filepath.Join(directory, key)
 
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
-		Bucket:      &cfg.s3Bucket,
-		Key:         &key,
+		Bucket:      aws.String(cfg.s3Bucket),
+		Key:         aws.String(key),
 		Body:        tempFile,
-		ContentType: &mediaType,
+		ContentType: aws.String(mediaType),
 	})
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't upload file to the s3 bucket", err)
 		return
 	}
 
-	videoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, key)
+	videoURL := cfg.getObjectURL(key)
 	video.VideoURL = &videoURL
 
 	err = cfg.db.UpdateVideo(video)
@@ -128,4 +150,35 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondWithJSON(w, http.StatusOK, video)
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+
+	var cmdBuffer bytes.Buffer
+	cmd.Stdout = &cmdBuffer
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ffprobe error: %v", err)
+	}
+
+	resultStreams := Streams{}
+	err := json.Unmarshal(cmdBuffer.Bytes(), &resultStreams)
+	if err != nil {
+		return "", fmt.Errorf("could not parse ffprobe output: %v", err)
+	}
+
+	if len(resultStreams.Streams) == 0 {
+		return "", errors.New("no video streams found")
+	}
+
+	width := resultStreams.Streams[0].Width
+	height := resultStreams.Streams[0].Height
+
+	if width == 16*height/9 {
+		return "16:9", nil
+	} else if height == 16*width/9 {
+		return "9:16", nil
+	}
+	return "other", nil
 }

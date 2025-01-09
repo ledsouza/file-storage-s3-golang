@@ -1,17 +1,12 @@
 package main
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"errors"
-	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -63,26 +58,20 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	randomBytes := make([]byte, 32)
-	_, err = rand.Read(randomBytes)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't generate random bytes", err)
-		return
-	}
-	randomString := base64.RawURLEncoding.EncodeToString(randomBytes)
+	assetPath := getAssetPath(mediaType)
+	assetDiskPath := cfg.getAssetDiskPath(assetPath)
 
-	fileExtension := strings.Split(mediaType, "/")[1]
-	fileName := randomString + "." + fileExtension
-	filePath := filepath.Join(cfg.assetsRoot, fileName)
-	mediaFile, err := os.Create(filePath)
+	mediaFile, err := os.Create(assetDiskPath)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create file", err)
 		return
 	}
+	defer mediaFile.Close()
 
 	_, err = io.Copy(mediaFile, tbFile)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't copy the image content to media file", err)
+		respondWithError(w, http.StatusInternalServerError, "Error saving file", err)
+		return
 	}
 
 	video, err := cfg.db.GetVideo(videoID)
@@ -96,11 +85,11 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 
 	if video.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "Can only upload thumbnail for your own videos", nil)
+		respondWithError(w, http.StatusUnauthorized, "Not authorized to update this video", nil)
 		return
 	}
 
-	thumbnailURL := fmt.Sprintf("http://localhost:%s/assets/%s.%s", cfg.port, randomString, fileExtension)
+	thumbnailURL := cfg.getAssetURL(assetPath)
 	video.ThumbnailURL = &thumbnailURL
 
 	err = cfg.db.UpdateVideo(video)
